@@ -25,7 +25,7 @@
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'none';
   script-src 'self' https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js 'sha256-yf2wpw749OEfZmPUNmNkm4hPIA0ZphFyIREW1Ez9k6o=';
-  style-src 'self' https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css 'sha256-KnQQIQuzNEEm+RgQJE7TKnfWWHqueYGR+oJH9pgFw8Y=';
+  style-src 'self' https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css 'sha256-5oj9b6Ouxlw9b2TRNYCfJOnNlICugDLdhqIwD8GR5b0=';
   img-src 'self' data: blob: https://tiles.openfreemap.org;
   connect-src 'self' https://tiles.openfreemap.org;
   worker-src 'self' blob:;
@@ -42,6 +42,9 @@
   /* Inline CSS on purpose: this is the whole page, one file. */
   html, body, #map { height: 100%; margin: 0; padding: 0; }
   body { background: #111; color-scheme: light dark; }
+  /* The browser's own [hidden] rule loses to any author `display`, so without
+     this the empty #message box (display: flex) sits on top of the map. */
+  [hidden] { display: none !important; }
   #map { position: absolute; inset: 0; }
 
   /* A tiny, dependency-free pin: a coloured dot with a name label under it. */
