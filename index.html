@@ -8,7 +8,13 @@
   Späti Bot map Mini App. No server, no data file: everything this page draws
   comes from the URL fragment (`location.hash`), which the browser never sends
   to any server. See src/spaeti_bot/mapfrag.py for the encoder and the format
-  this page must parse identically ("v=1&a=..&b=..&p=lat,lon,tier,card,name;...").
+  this page must parse identically ("v=2&a=..&b=..&p=lat,lon,tier,card,name;...").
+
+  The version says which tier numbering the pins use. v=1 is the six-tier
+  numbering of the first map release, v=2 the seven-tier one (REPORTED_OPEN
+  inserted at 3). The bot emits v=2; v=1 links stay in chat history and this
+  page is published before a new bot image is deployed, so both are read, each
+  with its own colour table. Any other version is refused.
 
   Third-party requests are exactly: the pinned MapLibre GL JS/CSS bundle (SRI
   and CSP-checked, from jsdelivr) and the OpenFreeMap vector tile style/tiles
@@ -24,7 +30,7 @@
 -->
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'none';
-  script-src 'self' https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js 'sha256-yf2wpw749OEfZmPUNmNkm4hPIA0ZphFyIREW1Ez9k6o=';
+  script-src 'self' https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js 'sha256-Ij8qIzEagZvNCJPa3n/LmZGP8SVdVj07GkUJ+0T85WY=';
   style-src 'self' https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css 'sha256-5oj9b6Ouxlw9b2TRNYCfJOnNlICugDLdhqIwD8GR5b0=';
   img-src 'self' data: blob: https://tiles.openfreemap.org;
   connect-src 'self' https://tiles.openfreemap.org;
@@ -136,9 +142,10 @@ function decodeFragment(fragment) {
     var value = i === -1 ? "" : part.slice(i + 1);
     fields[key] = value;
   });
-  if (fields.v !== "1") {
+  if (fields.v !== "1" && fields.v !== "2") {
     throw new Error("unsupported map fragment version: " + fields.v);
   }
+  var version = parseInt(fields.v, 10);
   function coord(value) {
     var parts = value.split(",");
     var c = { lat: parseFloat(parts[0]), lon: parseFloat(parts[1]) };
@@ -160,6 +167,7 @@ function decodeFragment(fragment) {
         tier: parseInt(parts[2], 10),
         card: parts[3] === "y" ? "yes" : parts[3] === "n" ? "no" : null,
         name: name,
+        version: version,
       };
       if (isFiniteCoord(pin)) {
         pins.push(pin);
@@ -173,13 +181,20 @@ function decodeFragment(fragment) {
 // green (confirmed open) through amber/grey (uncertain) to red (posted
 // closed). GREY_INDEX is also the fallback for a tier this page does not
 // recognise (a future Tier value, or a corrupt fragment): grey reads as
-// "unknown", never as the alarming "closed" red.
-var TIER_COLORS = ["#22c55e", "#84cc16", "#eab308", "#9ca3af", "#6b7280", "#ef4444"];
-var GREY_INDEX = 3;
+// "unknown", never as the alarming "closed" red. One table per fragment
+// version, because the tier integers changed meaning between them: v1 is the
+// six-tier numbering exactly as first shipped, v2 adds REPORTED_OPEN (a paler
+// amber than GREY_WITH_SUPPORT) at 3.
+var TIER_COLORS_V1 = ["#22c55e", "#84cc16", "#eab308", "#9ca3af", "#6b7280", "#ef4444"];
+var GREY_INDEX_V1 = 3;
+var TIER_COLORS_V2 = ["#22c55e", "#84cc16", "#eab308", "#fcd34d", "#9ca3af", "#6b7280", "#ef4444"];
+var GREY_INDEX_V2 = 4;
 var CARD_GLYPH = { yes: "💳", no: "💶" }; // 💳 / 💶; unknown card gets no glyph
 
-function tierColor(tier) {
-  return TIER_COLORS[tier] !== undefined ? TIER_COLORS[tier] : TIER_COLORS[GREY_INDEX];
+function tierColor(tier, version) {
+  var colors = version === 1 ? TIER_COLORS_V1 : TIER_COLORS_V2;
+  var grey = version === 1 ? GREY_INDEX_V1 : GREY_INDEX_V2;
+  return colors[tier] !== undefined ? colors[tier] : colors[grey];
 }
 
 function pinElement(pin) {
@@ -187,7 +202,7 @@ function pinElement(pin) {
   el.className = "spaeti-pin";
   var dot = document.createElement("div");
   dot.className = "dot";
-  dot.style.background = tierColor(pin.tier);
+  dot.style.background = tierColor(pin.tier, pin.version);
   var label = document.createElement("div");
   label.className = "label";
   var glyph = CARD_GLYPH[pin.card] || "";
