@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Späti Bot map</title>
+<!--
+  Späti Bot map Mini App. No server, no data file: everything this page draws
+  comes from the URL fragment (`location.hash`), which the browser never sends
+  to any server. See src/spaeti_bot/mapfrag.py for the encoder and the format
+  this page must parse identically ("v=1&a=..&b=..&p=lat,lon,tier,card,name;...").
+
+  Third-party requests are exactly: the pinned MapLibre GL JS/CSS bundle (SRI
+  and CSP-checked, from jsdelivr) and the OpenFreeMap vector tile style/tiles
+  (tiles.openfreemap.org). No analytics, no cookies, no storage.
+
+  The CSP below pins the page's own inline script and style blocks by sha256
+  hash rather than "unsafe-inline": whenever either block's exact bytes
+  (everything strictly between its opening and closing tag) change,
+  recompute both hashes and update the meta tag below AND
+  tests/test_map.py's test that recomputes them from this file and asserts
+  they are still the ones the CSP allows — that test contains a working
+  extractor to copy if you need one on the command line.
+-->
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'none';
+  script-src 'self' https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js 'sha256-yf2wpw749OEfZmPUNmNkm4hPIA0ZphFyIREW1Ez9k6o=';
+  style-src 'self' https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css 'sha256-KnQQIQuzNEEm+RgQJE7TKnfWWHqueYGR+oJH9pgFw8Y=';
+  img-src 'self' data: blob: https://tiles.openfreemap.org;
+  connect-src 'self' https://tiles.openfreemap.org;
+  worker-src 'self' blob:;
+  child-src 'self' blob:;
+  base-uri 'none';
+  form-action 'none';
+">
+<link
+  rel="stylesheet"
+  href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+  integrity="sha384-MinO0mNliZ3vwppuPOUnGa+iq619pfMhLVUXfC4LHwSCvF9H+6P/KO4Q7qBOYV5V"
+  crossorigin="anonymous">
+<style>
+  /* Inline CSS on purpose: this is the whole page, one file. */
+  html, body, #map { height: 100%; margin: 0; padding: 0; }
+  body { background: #111; color-scheme: light dark; }
+  #map { position: absolute; inset: 0; }
+
+  /* A tiny, dependency-free pin: a coloured dot with a name label under it. */
+  .spaeti-pin {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    transform: translateY(6px); /* dot centres on the coordinate, label hangs below */
+  }
+  .spaeti-pin .dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid #fff;
+    box-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+  }
+  .spaeti-pin .label {
+    font: 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.55);
+    padding: 1px 5px;
+    border-radius: 4px;
+    white-space: nowrap;
+    max-width: 40vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .spaeti-endpoint .dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px; /* square-ish so A/B stand out from round place pins */
+    background: #ffffff;
+    border: 2px solid #111;
+  }
+
+  #attribution {
+    position: absolute;
+    right: 4px;
+    bottom: 2px;
+    z-index: 5;
+    font: 11px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #ccc;
+    background: rgba(0, 0, 0, 0.35);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  #attribution a { color: #fff; }
+
+  #message {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    text-align: center;
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #eee;
+    background: #111;
+  }
+</style>
+</head>
+<body>
+<div id="map" role="application" aria-label="Map of nearby Spätis"></div>
+<div id="attribution">© <a href="https://www.openstreetmap.org/copyright" rel="noopener">OpenStreetMap</a> contributors, © <a href="https://openmaptiles.org/" rel="noopener">OpenMapTiles</a>, <a href="https://openfreemap.org" rel="noopener">OpenFreeMap</a></div>
+<div id="message" hidden></div>
+
+<script
+  src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"
+  integrity="sha384-SYKAG6cglRMN0RVvhNeBY0r3FYKNOJtznwA0v7B5Vp9tr31xAHsZC0DqkQ/pZDmj"
+  crossorigin="anonymous"></script>
+<script>
+"use strict";
+
+function isFiniteCoord(o) {
+  return !!o && Number.isFinite(o.lat) && Number.isFinite(o.lon);
+}
+
+// Mirrors spaeti_bot.mapfrag.decode(): keep the two in lockstep, field for
+// field. A coordinate that fails to parse (NaN) or a stray Infinity is
+// dropped here rather than handed to MapLibre, which would otherwise throw
+// deep inside bounds/marker code and leave a blank page.
+function decodeFragment(fragment) {
+  var fields = {};
+  fragment.split("&").forEach(function (part) {
+    var i = part.indexOf("=");
+    var key = i === -1 ? part : part.slice(0, i);
+    var value = i === -1 ? "" : part.slice(i + 1);
+    fields[key] = value;
+  });
+  if (fields.v !== "1") {
+    throw new Error("unsupported map fragment version: " + fields.v);
+  }
+  function coord(value) {
+    var parts = value.split(",");
+    var c = { lat: parseFloat(parts[0]), lon: parseFloat(parts[1]) };
+    return isFiniteCoord(c) ? c : null;
+  }
+  var a = "a" in fields ? coord(fields.a) : null;
+  var b = "b" in fields ? coord(fields.b) : null;
+  var pins = [];
+  var raw = fields.p || "";
+  if (raw) {
+    raw.split(";").forEach(function (chunk) {
+      // Only the name may itself contain commas (percent-encoded away before
+      // this split), so a 5-way split with the last field unlimited is safe.
+      var parts = chunk.split(",");
+      var name = decodeURIComponent(parts.slice(4).join(","));
+      var pin = {
+        lat: parseFloat(parts[0]),
+        lon: parseFloat(parts[1]),
+        tier: parseInt(parts[2], 10),
+        card: parts[3] === "y" ? "yes" : parts[3] === "n" ? "no" : null,
+        name: name,
+      };
+      if (isFiniteCoord(pin)) {
+        pins.push(pin);
+      }
+    });
+  }
+  return { pins: pins, a: a, b: b };
+}
+
+// Tier order matches spaeti_bot.spaeti.Tier: lower is better. Colours run
+// green (confirmed open) through amber/grey (uncertain) to red (posted
+// closed). GREY_INDEX is also the fallback for a tier this page does not
+// recognise (a future Tier value, or a corrupt fragment): grey reads as
+// "unknown", never as the alarming "closed" red.
+var TIER_COLORS = ["#22c55e", "#84cc16", "#eab308", "#9ca3af", "#6b7280", "#ef4444"];
+var GREY_INDEX = 3;
+var CARD_GLYPH = { yes: "💳", no: "💶" }; // 💳 / 💶; unknown card gets no glyph
+
+function tierColor(tier) {
+  return TIER_COLORS[tier] !== undefined ? TIER_COLORS[tier] : TIER_COLORS[GREY_INDEX];
+}
+
+function pinElement(pin) {
+  var el = document.createElement("div");
+  el.className = "spaeti-pin";
+  var dot = document.createElement("div");
+  dot.className = "dot";
+  dot.style.background = tierColor(pin.tier);
+  var label = document.createElement("div");
+  label.className = "label";
+  var glyph = CARD_GLYPH[pin.card] || "";
+  label.textContent = (glyph ? glyph + " " : "") + pin.name;
+  el.appendChild(dot);
+  el.appendChild(label);
+  return el;
+}
+
+function endpointElement(text) {
+  var el = document.createElement("div");
+  el.className = "spaeti-endpoint";
+  var dot = document.createElement("div");
+  dot.className = "dot";
+  var label = document.createElement("div");
+  label.className = "label";
+  label.textContent = text;
+  el.appendChild(dot);
+  el.appendChild(label);
+  return el;
+}
+
+function showMessage(text) {
+  var el = document.getElementById("message");
+  el.textContent = text;
+  el.hidden = false;
+  document.getElementById("map").hidden = true;
+}
+
+function buildMap(parsed) {
+  var bounds = new maplibregl.LngLatBounds();
+  parsed.pins.forEach(function (pin) {
+    bounds.extend([pin.lon, pin.lat]);
+  });
+  if (parsed.b) {
+    bounds.extend([parsed.b.lon, parsed.b.lat]);
+  }
+  if (parsed.a) {
+    bounds.extend([parsed.a.lon, parsed.a.lat]);
+  }
+
+  var map = new maplibregl.Map({
+    container: "map",
+    style: "https://tiles.openfreemap.org/styles/liberty",
+    bounds: bounds,
+    fitBoundsOptions: { padding: 48, maxZoom: 16 },
+    attributionControl: false, // the page supplies its own attribution box
+  });
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+
+  parsed.pins.forEach(function (pin) {
+    new maplibregl.Marker({ element: pinElement(pin), anchor: "bottom" }).setLngLat([pin.lon, pin.lat]).addTo(map);
+  });
+
+  if (parsed.b) {
+    new maplibregl.Marker({ element: endpointElement("B"), anchor: "bottom" })
+      .setLngLat([parsed.b.lon, parsed.b.lat])
+      .addTo(map);
+  }
+
+  if (parsed.a) {
+    new maplibregl.Marker({ element: endpointElement("A"), anchor: "bottom" })
+      .setLngLat([parsed.a.lon, parsed.a.lat])
+      .addTo(map);
+  }
+
+  // The A-B line only makes sense when both ends are on the map: a GPS-started
+  // board never carries "a" (see mapfrag.encode's docstring), so there is
+  // nothing to draw a line from in that case.
+  if (parsed.a && parsed.b) {
+    map.on("load", function () {
+      map.addSource("route-line", {
+        type: "geojson",
+        data: {
+          type: "Feature",
+          geometry: {
+            type: "LineString",
+            coordinates: [
+              [parsed.a.lon, parsed.a.lat],
+              [parsed.b.lon, parsed.b.lat],
+            ],
+          },
+          properties: {},
+        },
+      });
+      map.addLayer({
+        id: "route-line",
+        type: "line",
+        source: "route-line",
+        paint: { "line-color": "#3b82f6", "line-width": 3, "line-dasharray": [2, 1] },
+      });
+    });
+  }
+}
+
+function main() {
+  var fragment = location.hash.replace(/^#/, "");
+  var parsed;
+  try {
+    parsed = fragment ? decodeFragment(fragment) : { pins: [], a: null, b: null };
+  } catch (err) {
+    parsed = { pins: [], a: null, b: null };
+  }
+
+  if (parsed.pins.length === 0 && !parsed.a && !parsed.b) {
+    showMessage("This map link has no places in it.");
+    return;
+  }
+
+  // Anything past this point talks to MapLibre; a bad fragment must never
+  // surface as a blank page, so any failure here falls back to a message.
+  try {
+    buildMap(parsed);
+  } catch (err) {
+    showMessage("This map link looks broken.");
+  }
+}
+
+main();
+</script>
+</body>
+</html>
